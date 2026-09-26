@@ -28,11 +28,11 @@ The current adapter targets:
 
 | Component | Reviewed version or identity |
 | --- | --- |
-| Overwolf | `0.309.0.14` |
+| Overwolf | `0.310.1.1` |
 | Outplayed | `175.3.12981` |
 | Core module | `OverWolf.Client.Core.dll`, pinned SHA-256 and MVID |
 | Target methods | `GetExtensionSubscriptions()` and `GetExtensionSubscriptionsIds()` |
-| Test date | 2026-09-08 |
+| Test date | 2026-09-26 |
 
 Unknown versions, hashes, architectures, and target metadata are refused. Updates can invalidate the adapter.
 

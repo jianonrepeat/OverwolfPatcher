@@ -18,20 +18,30 @@ namespace OverwolfPatcher.Testing
     internal static class PremiumCommand
     {
         const string Outplayed = "cghphpbjeabdkomiphingnegihoigeggcfphdofo";
-        const string ReviewedVersion = "0.309.0.14";
-        const string ReviewedCoreHash = "9DA15E0CACF446E59B3F728BA78F5CC8F0EC6D6616BB0F490BF90ABD21EF098E";
+        const string ReviewedVersion = "0.310.1.1";
+        const string ReviewedCoreHash = "CCE1BFBE33A0DAA6189475583C6680CFC0043F015B1691A23AE8CF23CB45DE2D";
         const string ProfilerClsid = "{4D7C38E9-7C8A-4F5D-9D2C-1D3E7BC9F1A4}";
         internal static int Run(string[] args)
         {
-            var command = args.Length == 0 ? "status" : args[0].ToLowerInvariant();
+            // Double-clicking the exe passes no args. Probing the install as
+            // "status" then throws on missing/updated installs and the temporary
+            // console closes at once (issue #24). Show help instead so the
+            // window has something readable before Program pauses.
+            if (args.Length == 0) args = new[] { "--help" };
+            var command = args[0].ToLowerInvariant();
             if (command == "--help" || command == "help")
             {
                 Console.WriteLine("OverwolfPatcher status|stage|apply|restore|baseline|instrument [--install DIR] [--output DIR] [--backup DIR]");
+                Console.WriteLine("Run from PowerShell so output stays visible; double-clicking only shows this help.");
+                Console.WriteLine("Examples:");
+                Console.WriteLine("  OverwolfPatcher.exe status");
+                Console.WriteLine("  OverwolfPatcher.exe baseline --entry launcher --wait-ms 5000");
                 Console.WriteLine("stage/apply default to Outplayed plan 61. Other apps: --app EXTENSION_ID --plans 1,2");
                 Console.WriteLine("status is read-only. stage writes a copy. apply/restore require Overwolf to be closed.");
                 Console.WriteLine("baseline launches OverwolfLauncher.exe without profiling; use --entry managed to reproduce direct Overwolf.exe.");
                 Console.WriteLine("instrument launches OverwolfLauncher.exe so profiling reaches only its managed Overwolf.exe child; --mode bootstrap|observe|flags|neutral|premium (default neutral).");
                 Console.WriteLine("instrument options: --mode MODE --profiler PROFILER_X64_DLL --log LOG_FILE --wait-ms N");
+                Console.WriteLine("Premium mode defaults to --plans 1-99 (all common plan IDs). Narrow with --plans 61 or --plans 1,2,3.");
                 Console.WriteLine("Local legacy subscription API testing only; login is required. No server subscription is granted.");
                 return 0;
             }
@@ -50,8 +60,8 @@ namespace OverwolfPatcher.Testing
             if (command == "instrument") return Instrument(install, version, target, options);
             // Confirmed in live testing: this launcher verifies Core before login.
             // A structurally valid staged assembly is not a deployable assembly.
-            if (command == "apply" && version == "0.309.0.14")
-                throw new NotSupportedException("Overwolf 0.309.0.14 rejects modified Client.Core at startup. Live apply is disabled; use stage for offline investigation.");
+            if (command == "apply" && version == ReviewedVersion)
+                throw new NotSupportedException("Overwolf " + ReviewedVersion + " rejects modified Client.Core at startup. Live apply is disabled; use stage for offline investigation.");
             if (command == "restore")
             {
                 RequireStopped();
@@ -60,8 +70,8 @@ namespace OverwolfPatcher.Testing
             }
             var app = Get(options, "--app", Outplayed);
             if (app.Length != 40 || app.Any(c => c < 'a' || c > 'p')) throw new ArgumentException("Expected a 40-character Overwolf extension ID.");
-            var planText = Get(options, "--plans", app == Outplayed ? "61" : null)
-                ?? throw new ArgumentException("Specify --plans for this app.");
+            var planText = Get(options, "--plans", app == Outplayed ? "61" : null);
+            if (planText == null) throw new ArgumentException("Specify --plans for this app.");
             var plans = planText.Split(',').Select(int.Parse).Distinct().ToArray();
             if (plans.Length == 0 || plans.Length > 32 || plans.Any(p => p <= 0)) throw new ArgumentException("Specify 1 to 32 positive plan IDs.");
             Console.WriteLine("Overwolf " + version + " | " + target);
@@ -156,12 +166,27 @@ namespace OverwolfPatcher.Testing
 
         static string ActiveVersion(string install)
         {
-            var config = XDocument.Load(Path.Combine(install, "Overwolf.exe.config"));
-            var paths = config.Descendants().Where(e => e.Name.LocalName == "probing")
-                .SelectMany(e => ((string)e.Attribute("privatePath") ?? "").Split(';'))
-                .Where(p => Version.TryParse(p, out _) && p.Split('.').Length == 4).Distinct().ToArray();
-            if (paths.Length != 1) throw new IOException("Cannot uniquely identify the active Overwolf version from its launcher configuration.");
-            return paths[0];
+            var configPath = Path.Combine(install, "Overwolf.exe.config");
+            if (File.Exists(configPath))
+            {
+                var config = XDocument.Load(configPath);
+                var paths = config.Descendants().Where(e => e.Name.LocalName == "probing")
+                    .SelectMany(e => ((string)e.Attribute("privatePath") ?? "").Split(';'))
+                    .Where(p => Version.TryParse(p, out _) && p.Split('.').Length == 4).Distinct().ToArray();
+                if (paths.Length == 1) return paths[0];
+            }
+            using (var machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32))
+            using (var key = machine.OpenSubKey(@"SOFTWARE\WOW6432Node\Overwolf"))
+            {
+                var current = key?.GetValue("CurrentVersion") as string;
+                if (!string.IsNullOrWhiteSpace(current) && Version.TryParse(current, out _) && Directory.Exists(Path.Combine(install, current)))
+                    return current;
+            }
+            var versions = Directory.GetDirectories(install).Select(Path.GetFileName)
+                .Where(name => !string.IsNullOrEmpty(name) && name.Split('.').Length == 4 && Version.TryParse(name, out _))
+                .OrderByDescending(name => name).ToArray();
+            if (versions.Length == 1) return versions[0];
+            throw new IOException("Cannot uniquely identify the active Overwolf version. Install directory contains " + versions.Length + " version folders.");
         }
 
         static string DiscoverInstall()
@@ -190,6 +215,8 @@ namespace OverwolfPatcher.Testing
 
             var executable = Path.Combine(install, "Overwolf.exe");
             var launcher = Path.Combine(install, "OverwolfLauncher.exe");
+            if (!IsManagedAssembly(executable)) executable = Path.Combine(install, version, "Overwolf.exe");
+            if (!File.Exists(launcher)) launcher = Path.Combine(install, version, "OverwolfLauncher.exe");
             if (!File.Exists(executable)) throw new FileNotFoundException("The managed Overwolf executable was not found.", executable);
             if (!File.Exists(launcher)) throw new FileNotFoundException("The native Overwolf launcher was not found.", launcher);
             if (!IsPe64(executable) || !IsPe64(launcher)) throw new NotSupportedException("Overwolf entry executables are not x64 PE files.");
@@ -205,12 +232,12 @@ namespace OverwolfPatcher.Testing
 
             var app = Get(options, "--app", Outplayed);
             if (app.Length != 40 || app.Any(c => c < 'a' || c > 'p')) throw new ArgumentException("Expected a 40-character Overwolf extension ID.");
-            var planText = Get(options, "--plans", app == Outplayed ? "61" : null);
-            if (mode == "premium" && planText == null) throw new ArgumentException("Specify --plans for this app in premium mode.");
+            var planText = Get(options, "--plans", null);
+            if (mode == "premium" && string.IsNullOrEmpty(planText)) planText = "1-99";
             var plans = mode == "premium"
-                ? planText.Split(',').Select(int.Parse).Distinct().ToArray()
+                ? ParsePlans(planText)
                 : new int[0];
-            if (plans.Length > 32 || plans.Any(p => p <= 0)) throw new ArgumentException("Specify 1 to 32 positive plan IDs.");
+            if (plans.Length == 0 || plans.Length > 128 || plans.Any(p => p <= 0)) throw new ArgumentException("Specify 1 to 128 positive plan IDs, or use --plans 1-99 for all common plans.");
             var waitText = Get(options, "--wait-ms", "0");
             if (!int.TryParse(waitText, out var waitMs) || waitMs < 0 || waitMs > 60000)
                 throw new ArgumentException("--wait-ms must be between 0 and 60000.");
@@ -233,7 +260,7 @@ namespace OverwolfPatcher.Testing
             {
                 FileName = launcher,
                 Arguments = "-from-desktop",
-                WorkingDirectory = install,
+                WorkingDirectory = File.Exists(Path.Combine(install, version, "OverwolfLauncher.exe")) ? Path.Combine(install, version) : install,
                 UseShellExecute = false,
                 CreateNoWindow = false
             };
@@ -271,12 +298,14 @@ namespace OverwolfPatcher.Testing
             RequireStopped();
             var managedExecutable = Path.Combine(install, "Overwolf.exe");
             var nativeLauncher = Path.Combine(install, "OverwolfLauncher.exe");
+            if (!File.Exists(nativeLauncher)) nativeLauncher = Path.Combine(install, version, "OverwolfLauncher.exe");
+            if (!IsManagedAssembly(managedExecutable)) managedExecutable = Path.Combine(install, version, "Overwolf.exe");
+            if (!File.Exists(managedExecutable)) throw new FileNotFoundException("The managed Overwolf executable was not found.", managedExecutable);
             var entry = Get(options, "--entry", "launcher").ToLowerInvariant();
             if (entry != "launcher" && entry != "managed") throw new ArgumentException("--entry must be launcher or managed.");
             var executable = entry == "launcher" ? nativeLauncher : managedExecutable;
             if (!File.Exists(executable)) throw new FileNotFoundException("The selected Overwolf executable was not found.", executable);
             if (!IsPe64(executable)) throw new NotSupportedException("The selected Overwolf executable is not an x64 PE.");
-            if (!File.Exists(managedExecutable)) throw new FileNotFoundException("The managed Overwolf executable was not found.", managedExecutable);
             try { AssemblyName.GetAssemblyName(managedExecutable); }
             catch (Exception error) { throw new NotSupportedException("Overwolf.exe is not the managed entry executable.", error); }
 
@@ -386,6 +415,32 @@ namespace OverwolfPatcher.Testing
 
         delegate bool EnumWindowsProc(IntPtr window, IntPtr state);
 
+        static int[] ParsePlans(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return Array.Empty<int>();
+            var parts = text.Split(',').Select(p => p.Trim()).Where(p => !string.IsNullOrEmpty(p)).ToArray();
+            var set = new System.Collections.Generic.SortedSet<int>();
+            foreach (var part in parts)
+            {
+                if (part.Contains("-"))
+                {
+                    var range = part.Split('-');
+                    if (range.Length != 2 || !int.TryParse(range[0], out var start) || !int.TryParse(range[1], out var end) || start > end || start <= 0)
+                        throw new ArgumentException("Invalid plan range: " + part);
+                    for (int v = start; v <= end && set.Count < 128; v++) set.Add(v);
+                }
+                else if (int.TryParse(part, out var single) && single > 0)
+                {
+                    set.Add(single);
+                }
+                else
+                {
+                    throw new ArgumentException("Invalid plan ID: " + part);
+                }
+            }
+            return set.Take(128).ToArray();
+        }
+
         static bool IsPe64(string path)
         {
             using (var stream = File.OpenRead(path))
@@ -401,6 +456,13 @@ namespace OverwolfPatcher.Testing
             }
         }
 
+        static bool IsManagedAssembly(string path)
+        {
+            try { return AssemblyName.GetAssemblyName(path) != null; }
+            catch { return false; }
+        }
+
         static string Get(Dictionary<string, string> options, string name, string fallback) => options.TryGetValue(name, out var value) ? value : fallback;
     }
 }
+

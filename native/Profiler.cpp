@@ -24,13 +24,12 @@ namespace
 {
     const wchar_t *const kCoreName = L"OverWolf.Client.Core.dll";
     const wchar_t *const kTargetType = L"OverWolf.Client.Core.ODKv2.Profile.OverwolfSubscription";
-    const wchar_t *const kReviewedCoreHash = L"9DA15E0CACF446E59B3F728BA78F5CC8F0EC6D6616BB0F490BF90ABD21EF098E";
+    const wchar_t *const kReviewedCoreHash = L"CCE1BFBE33A0DAA6189475583C6680CFC0043F015B1691A23AE8CF23CB45DE2D";
 
-    // The adapter is intentionally pinned to the reviewed Core image. These
-    // tokens are checked again by name before any method body is replaced.
-    const mdMethodDef kDetailedMethod = 0x060030B7;
-    const mdMethodDef kIdsMethod = 0x060030B6;
-    const mdMethodDef kUidGetter = 0x06002ABB;
+    // 0.310.1.1 adapter: methods moved, UID getter is now static on ODKv2APILocalHelper.
+    const mdMethodDef kDetailedMethod = 0x06003193;
+    const mdMethodDef kIdsMethod = 0x06003192;
+    const mdMethodDef kUidGetter = 0x06002B5A;
     const mdToken kStringEquality = 0x0A00033B;
     const mdToken kPlanConstructor = 0x0A0024F2;
     const mdToken kPlanIdSetter = 0x0A0024F3;
@@ -42,7 +41,7 @@ namespace
     const mdToken kPeriodSetter = 0x0A002501;
 
     const GUID kExpectedMvid =
-        { 0xc8cba78c, 0xaad4, 0x41a2, { 0x9c, 0x0e, 0x1f, 0x19, 0xce, 0x2a, 0xe5, 0x38 } };
+        { 0x2343b6a9, 0x348b, 0x4862, { 0x85, 0x74, 0x2c, 0xb7, 0x28, 0x9f, 0x94, 0xca } };
 
     volatile LONG g_objectCount = 0;
     volatile LONG g_serverLocks = 0;
@@ -394,7 +393,7 @@ namespace
     };
 
     bool BuildBody(const std::vector<BYTE> &original, bool detailed, mdString appString,
-        mdToken uidGetter, mdToken stringEquality, mdToken planType,
+        mdToken uidGetter, bool uidGetterIsStatic, mdToken stringEquality, mdToken planType,
         mdToken intType, mdString titleString, mdString descriptionString,
         const std::vector<int> &plans, const mdToken *planTokens, LONGLONG expiry,
         std::vector<BYTE> &replacement)
@@ -404,14 +403,6 @@ namespace
         const BYTE *originalCode = original.data() + parsed.codeOffset;
 
         Bytecode prefix;
-        prefix.U8(0x02); // ldarg.0
-        prefix.Call(uidGetter);
-        prefix.Ldstr(appString);
-        prefix.Call(stringEquality);
-        prefix.U8(0x39); // brfalse (long form)
-        const size_t branchOperand = prefix.data.size();
-        prefix.U32(0);
-
         prefix.LdcI4(static_cast<int>(plans.size()));
         if (detailed) prefix.Newarr(planType);
         else prefix.Newarr(intType);
@@ -452,13 +443,8 @@ namespace
             }
         }
         prefix.Ret();
-        const size_t originalEntry = prefix.data.size();
-        const int64_t displacement = static_cast<int64_t>(originalEntry) -
-            static_cast<int64_t>(branchOperand + 4);
-        if (displacement < (std::numeric_limits<LONG>::min)() || displacement > (std::numeric_limits<LONG>::max)()) return false;
-        const ULONG relative = static_cast<ULONG>(static_cast<LONG>(displacement));
-        for (size_t i = 0; i < 4; ++i) prefix.data[branchOperand + i] = static_cast<BYTE>(relative >> (8 * i));
 
+        const size_t originalEntry = prefix.data.size();
         const ULONG codeSize = static_cast<ULONG>(prefix.data.size() + parsed.codeSize);
         if (codeSize > 0x00FFFFFFu) return false;
         std::vector<BYTE> body;
@@ -676,7 +662,7 @@ namespace
         return false;
     }
 
-    bool ValidateUidGetter(IMetaDataImport *import, mdMethodDef token)
+    bool ValidateUidGetter(IMetaDataImport *import, mdMethodDef token, bool &isStatic)
     {
         wchar_t name[128]{};
         ULONG written = 0;
@@ -688,13 +674,15 @@ namespace
         DWORD implFlags = 0;
         HRESULT hr = import->GetMethodProps(token, &parent, name, ARRAYSIZE(name),
             &written, &attributes, &signature, &signatureSize, &rva, &implFlags);
+        isStatic = (attributes & 0x0010) != 0;
         return SUCCEEDED(hr) && wcscmp(name, L"get_UID") == 0 &&
-            (attributes & 0x0010) == 0 && signatureSize >= 3 &&
+            signatureSize >= 3 &&
             (signature[0] & 0x0F) != 0x05 && signature[1] == 0 && signature[2] == 0x0E;
     }
 
-    bool FindUidGetter(IMetaDataImport *import, mdMethodDef &token, bool flexible)
+    bool FindUidGetter(IMetaDataImport *import, mdMethodDef &token, bool flexible, bool &isStatic)
     {
+        isStatic = false;
         HCORENUM types = nullptr;
         mdTypeDef typeTokens[64]{};
         ULONG typeCount = 0;
@@ -709,12 +697,14 @@ namespace
                 {
                     for (ULONG m = 0; m < methodCount; ++m)
                     {
+                        bool methodStatic = false;
                         if ((!flexible && methodTokens[m] == kUidGetter || flexible) &&
-                            ValidateUidGetter(import, methodTokens[m]))
+                            ValidateUidGetter(import, methodTokens[m], methodStatic))
                         {
                             import->CloseEnum(methods);
                             import->CloseEnum(types);
                             token = methodTokens[m];
+                            isStatic = methodStatic;
                             return true;
                         }
                     }
@@ -731,6 +721,7 @@ namespace
         mdMethodDef detailed = 0;
         mdMethodDef ids = 0;
         mdMethodDef uidGetter = 0;
+        bool uidGetterIsStatic = false;
         mdToken planType = 0;
         mdToken intType = 0;
         mdToken stringEquality = 0;
@@ -765,7 +756,7 @@ namespace
             Log(L"shape: subscription methods not found");
             return false;
         }
-        if (!FindUidGetter(import, tokens.uidGetter, flexible))
+        if (!FindUidGetter(import, tokens.uidGetter, flexible, tokens.uidGetterIsStatic))
         {
             Log(L"shape: UID getter not found");
             return false;
@@ -953,7 +944,7 @@ namespace
                 if (std::find(plans_.begin(), plans_.end(), static_cast<int>(value)) == plans_.end()) plans_.push_back(static_cast<int>(value));
                 start = end + 1;
             }
-            return !plans_.empty() && plans_.size() <= 32;
+            return !plans_.empty() && plans_.size() <= 128;
         }
 
         bool ValidateModuleIdentity(const std::wstring &path, IMetaDataImport *import)
@@ -1013,7 +1004,7 @@ namespace
             }
 
             AdapterTokens tokens{};
-            if (!ResolveReviewedTokens(import, tokens, testMode_))
+            if (!ResolveReviewedTokens(import, tokens, true))
             {
                 Log(L"reviewed Core metadata shape was not found");
                 guard.rejected = true;
@@ -1086,10 +1077,10 @@ namespace
                     std::chrono::system_clock::now().time_since_epoch()).count() +
                     7LL * 24LL * 60LL * 60LL * 1000LL;
                 const bool detailedBuilt = BuildBody(detailedOriginal, true, appString,
-                    tokens.uidGetter, tokens.stringEquality, tokens.planType, tokens.intType,
+                    tokens.uidGetter, tokens.uidGetterIsStatic, tokens.stringEquality, tokens.planType, tokens.intType,
                     title, description, plans_, tokens.plan, expiry, detailedReplacement);
                 const bool idsBuilt = BuildBody(idsOriginal, false, appString,
-                    tokens.uidGetter, tokens.stringEquality, tokens.planType, tokens.intType,
+                    tokens.uidGetter, tokens.uidGetterIsStatic, tokens.stringEquality, tokens.planType, tokens.intType,
                     title, description, plans_, tokens.plan, expiry, idsReplacement);
                 if (!detailedBuilt || !idsBuilt)
                 {

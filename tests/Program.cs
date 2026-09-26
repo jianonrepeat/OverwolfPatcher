@@ -146,11 +146,11 @@ internal class Program
             var refusedInstall = Path.Combine(directory, "refused-install");
             Directory.CreateDirectory(refusedInstall);
             new XDocument(new XElement("configuration", new XElement("runtime", new XElement("assemblyBinding",
-                new XElement("probing", new XAttribute("privatePath", "Locales;0.309.0.14;0.309.0.14\\Locales"))))))
+                new XElement("probing", new XAttribute("privatePath", "Locales;0.310.1.1;0.310.1.1\\Locales"))))))
                 .Save(Path.Combine(refusedInstall, "Overwolf.exe.config"));
             bool refused = false;
             try { PremiumCommand.Run(new[] { "apply", "--install", refusedInstall }); }
-            catch (NotSupportedException error) { refused = error.Message.Contains("0.309.0.14"); }
+            catch (NotSupportedException error) { refused = error.Message.Contains("0.310.1.1"); }
             Assert(refused, "Known-incompatible version was not refused before accessing Core");
 
             Console.WriteLine("PASS: scoped IL execution, original paths, signature guards, repeated patch rejection, atomic replacement, and restoration.");
