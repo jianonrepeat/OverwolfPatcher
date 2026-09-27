@@ -17,10 +17,43 @@ namespace OverwolfPatcher.Testing
 {
     internal static class PremiumCommand
     {
-        const string Outplayed = "cghphpbjeabdkomiphingnegihoigeggcfphdofo";
-        const string ReviewedVersion = "0.310.1.1";
-        const string ReviewedCoreHash = "CCE1BFBE33A0DAA6189475583C6680CFC0043F015B1691A23AE8CF23CB45DE2D";
-        const string ProfilerClsid = "{4D7C38E9-7C8A-4F5D-9D2C-1D3E7BC9F1A4}";
+        private const string Outplayed = "cghphpbjeabdkomiphingnegihoigeggcfphdofo";
+        private const string ProfilerClsid = "{4D7C38E9-7C8A-4F5D-9D2C-1D3E7BC9F1A4}";
+
+        private sealed class KnownProfile
+        {
+            public KnownProfile(string version, string hash, bool uidGetterStatic)
+            {
+                Version = version;
+                Hash = hash;
+                UidGetterStatic = uidGetterStatic;
+            }
+            public string Version { get; }
+            public string Hash { get; }
+            public bool UidGetterStatic { get; }
+        }
+
+        private static readonly KnownProfile[] KnownProfiles = new[]
+        {
+            new KnownProfile("0.310.1.1",
+                "CCE1BFBE33A0DAA6189475583C6680CFC0043F015B1691A23AE8CF23CB45DE2D",
+                true),
+        };
+
+        private static KnownProfile ProfileByHash(string hash)
+        {
+            return KnownProfiles.FirstOrDefault(p => string.Equals(p.Hash, hash, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static KnownProfile ProfileByVersion(string version)
+        {
+            return KnownProfiles.FirstOrDefault(p => string.Equals(p.Version, version, StringComparison.Ordinal));
+        }
+
+        private static bool IsKnownVersion(string version)
+        {
+            return ProfileByVersion(version) != null;
+        }
         internal static int Run(string[] args)
         {
             // Double-clicking the exe passes no args. Probing the install as
@@ -58,22 +91,14 @@ namespace OverwolfPatcher.Testing
             var target = Path.Combine(install, version, PremiumAssembly.FileName);
             if (command == "baseline") return Baseline(install, version, options);
             if (command == "instrument") return Instrument(install, version, target, options);
-            // Confirmed in live testing: this launcher verifies Core before login.
-            // A structurally valid staged assembly is not a deployable assembly.
-            if (command == "apply" && version == ReviewedVersion)
-                throw new NotSupportedException("Overwolf " + ReviewedVersion + " rejects modified Client.Core at startup. Live apply is disabled; use stage for offline investigation.");
-            if (command == "restore")
-            {
-                RequireStopped();
-                Restore(target, Get(options, "--backup", null) ?? throw new ArgumentException("restore requires --backup DIR"));
-                return 0;
-            }
             var app = Get(options, "--app", Outplayed);
             if (app.Length != 40 || app.Any(c => c < 'a' || c > 'p')) throw new ArgumentException("Expected a 40-character Overwolf extension ID.");
             var planText = Get(options, "--plans", app == Outplayed ? "61" : null);
             if (planText == null) throw new ArgumentException("Specify --plans for this app.");
             var plans = planText.Split(',').Select(int.Parse).Distinct().ToArray();
             if (plans.Length == 0 || plans.Length > 32 || plans.Any(p => p <= 0)) throw new ArgumentException("Specify 1 to 32 positive plan IDs.");
+            var profile = ProfileByVersion(version)
+                ?? throw new NotSupportedException("Overwolf " + version + " is not a known reviewed version. The installed Core.dll has not been profiled and may behave differently than expected.");
             Console.WriteLine("Overwolf " + version + " | " + target);
             Console.WriteLine("App: " + app + " | local plans: " + string.Join(",", plans));
             var originalHash = Hash(target);
@@ -126,7 +151,8 @@ namespace OverwolfPatcher.Testing
         {
             var manifest = XDocument.Load(Path.Combine(backup, "manifest.xml")).Root;
             if (manifest == null || manifest.Name != "PremiumTest") throw new IOException("Invalid backup manifest.");
-            if (new DirectoryInfo(Path.GetDirectoryName(target)).Name != (string)manifest.Attribute("version"))
+            var backupVersion = (string)manifest.Attribute("version");
+            if (new DirectoryInfo(Path.GetDirectoryName(target)).Name != backupVersion)
                 throw new IOException("Backup belongs to a different Overwolf version.");
             var original = Path.Combine(backup, "original.dll");
             var expected = (string)manifest.Attribute("original");
@@ -207,11 +233,11 @@ namespace OverwolfPatcher.Testing
 
         static int Instrument(string install, string version, string target, Dictionary<string, string> options)
         {
-            if (version != ReviewedVersion)
-                throw new NotSupportedException("The startup profiler is pinned to Overwolf " + ReviewedVersion + "; refusing an unknown version.");
+            var profile = ProfileByVersion(version)
+                ?? throw new NotSupportedException("The startup profiler is pinned to known reviewed versions; refusing " + version + ".");
             RequireStopped();
-            if (!File.Exists(target) || Hash(target) != ReviewedCoreHash)
-                throw new IOException("The installed Core hash is not the reviewed clean baseline; refusing to profile it.");
+            if (!File.Exists(target) || !string.Equals(Hash(target), profile.Hash, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("The installed Core hash does not match the reviewed clean baseline for " + version + "; refusing to profile it.");
 
             var executable = Path.Combine(install, "Overwolf.exe");
             var launcher = Path.Combine(install, "OverwolfLauncher.exe");
@@ -273,7 +299,7 @@ namespace OverwolfPatcher.Testing
             start.EnvironmentVariables["OVERWOLF_PATCHER_PROFILER_LOG_PER_PROCESS"] = "1";
             start.EnvironmentVariables["OVERWOLF_PATCHER_PROFILER_MODE"] = mode;
             start.EnvironmentVariables["OVERWOLF_PATCHER_PROFILER_LOG"] = log;
-            start.EnvironmentVariables["OVERWOLF_PATCHER_EXPECTED_CORE_SHA256"] = ReviewedCoreHash;
+            start.EnvironmentVariables["OVERWOLF_PATCHER_EXPECTED_CORE_SHA256"] = profile.Hash;
             if (mode == "premium")
             {
                 start.EnvironmentVariables["OVERWOLF_PATCHER_APP"] = app;

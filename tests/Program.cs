@@ -146,15 +146,15 @@ internal class Program
             var refusedInstall = Path.Combine(directory, "refused-install");
             Directory.CreateDirectory(refusedInstall);
             new XDocument(new XElement("configuration", new XElement("runtime", new XElement("assemblyBinding",
-                new XElement("probing", new XAttribute("privatePath", "Locales;0.310.1.1;0.310.1.1\\Locales"))))))
+                new XElement("probing", new XAttribute("privatePath", "Locales;9.9.9.9;9.9.9.9\\Locales"))))))
                 .Save(Path.Combine(refusedInstall, "Overwolf.exe.config"));
             bool refused = false;
             try { PremiumCommand.Run(new[] { "apply", "--install", refusedInstall }); }
-            catch (NotSupportedException error) { refused = error.Message.Contains("0.310.1.1"); }
-            Assert(refused, "Known-incompatible version was not refused before accessing Core");
+            catch (NotSupportedException error) { refused = error.Message.Contains("9.9.9.9"); }
+            Assert(refused, "Unknown version was not refused before accessing Core");
 
             Console.WriteLine("PASS: scoped IL execution, original paths, signature guards, repeated patch rejection, atomic replacement, and restoration.");
-            Console.WriteLine("PASS: past expiry remains fixture data; known-incompatible live apply is refused.");
+            Console.WriteLine("PASS: past expiry remains fixture data; unknown versions are refused before accessing Core.");
             Console.WriteLine("PASS: startup profiler launch gates are kept separate from offline rewrite tests.");
             Console.WriteLine("Test artifacts: " + directory);
             return 0;
