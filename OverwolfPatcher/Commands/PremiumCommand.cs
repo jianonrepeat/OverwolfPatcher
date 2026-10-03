@@ -35,6 +35,9 @@ namespace OverwolfPatcher.Testing
 
         private static readonly KnownProfile[] KnownProfiles = new[]
         {
+            new KnownProfile("0.311.0.6",
+                "2C809D434B23E2F7753E79B1B3EEED3BA2DE5CA7D4D8D425D83CB641255ACE8E",
+                false),
             new KnownProfile("0.310.1.1",
                 "CCE1BFBE33A0DAA6189475583C6680CFC0043F015B1691A23AE8CF23CB45DE2D",
                 true),
@@ -54,7 +57,7 @@ namespace OverwolfPatcher.Testing
         {
             return ProfileByVersion(version) != null;
         }
-        internal static int Run(string[] args)
+        internal static int Run(string[] args, bool autoCloseOverwolf = false)
         {
             // Double-clicking the exe passes no args. Probing the install as
             // "status" then throws on missing/updated installs and the temporary
@@ -75,6 +78,7 @@ namespace OverwolfPatcher.Testing
                 Console.WriteLine("instrument launches OverwolfLauncher.exe so profiling reaches only its managed Overwolf.exe child; --mode bootstrap|observe|flags|neutral|premium (default neutral).");
                 Console.WriteLine("instrument options: --mode MODE --profiler PROFILER_X64_DLL --log LOG_FILE --wait-ms N");
                 Console.WriteLine("Premium mode defaults to --plans 1-99 (all common plan IDs). Narrow with --plans 61 or --plans 1,2,3.");
+                Console.WriteLine("--close-overwolf closes a running Overwolf before continuing; --force-close-overwolf also kills it if it does not exit.");
                 Console.WriteLine("Local legacy subscription API testing only; login is required. No server subscription is granted.");
                 return 0;
             }
@@ -82,15 +86,19 @@ namespace OverwolfPatcher.Testing
             var options = new Dictionary<string, string>();
             for (int i = 1; i < args.Length; i += 2)
             {
-                if (i + 1 == args.Length || !new[] { "--install", "--output", "--backup", "--app", "--plans", "--mode", "--profiler", "--log", "--wait-ms", "--entry" }.Contains(args[i]) || options.ContainsKey(args[i]))
+                if (i + 1 == args.Length || !new[] { "--install", "--output", "--backup", "--app", "--plans", "--mode", "--profiler", "--log", "--wait-ms", "--entry", "--close-overwolf", "--force-close-overwolf" }.Contains(args[i]) || options.ContainsKey(args[i]))
                     throw new ArgumentException("Invalid or duplicate option: " + args[i]);
                 options.Add(args[i], args[i + 1]);
             }
+            // The double-clicked exe has no way to tell the user to close Overwolf
+            // first, so it closes it instead. Typed invocations still refuse.
+            var closeOverwolf = autoCloseOverwolf || options.ContainsKey("--close-overwolf");
+            var forceCloseOverwolf = autoCloseOverwolf || options.ContainsKey("--force-close-overwolf");
             var install = Path.GetFullPath(Get(options, "--install", DiscoverInstall()));
             var version = ActiveVersion(install);
             var target = Path.Combine(install, version, PremiumAssembly.FileName);
-            if (command == "baseline") return Baseline(install, version, options);
-            if (command == "instrument") return Instrument(install, version, target, options);
+            if (command == "baseline") return Baseline(install, version, options, closeOverwolf, forceCloseOverwolf);
+            if (command == "instrument") return Instrument(install, version, target, options, closeOverwolf, forceCloseOverwolf);
             var app = Get(options, "--app", Outplayed);
             if (app.Length != 40 || app.Any(c => c < 'a' || c > 'p')) throw new ArgumentException("Expected a 40-character Overwolf extension ID.");
             var planText = Get(options, "--plans", app == Outplayed ? "61" : null);
@@ -115,7 +123,7 @@ namespace OverwolfPatcher.Testing
                     PremiumAssembly.Rewrite(assembly, app, plans);
                     Console.WriteLine("Legacy API structure is compatible. Other apps retain the original methods.");
                     if (command == "status") return 0;
-                    if (command == "apply") RequireStopped();
+                    if (command == "apply") RequireStopped(closeOverwolf, forceCloseOverwolf);
                     var output = Path.GetFullPath(Get(options, "--output", Path.Combine(Environment.CurrentDirectory,
                         "artifacts", "premium-tests", version, Guid.NewGuid().ToString("N"))));
                     if (Directory.Exists(output) && Directory.EnumerateFileSystemEntries(output).Any())
@@ -138,7 +146,7 @@ namespace OverwolfPatcher.Testing
                         Console.WriteLine("Installation unchanged. Staging does not prove that the app accepts a local plan.");
                         return 0;
                     }
-                    RequireStopped();
+                    RequireStopped(closeOverwolf, forceCloseOverwolf);
                     ReplaceChecked(target, staged, originalHash);
                     Console.WriteLine("Applied local API test. Sign in to Overwolf, then open the app to verify it.");
                     Console.WriteLine("Restore: OverwolfPatcher restore --backup \"" + output + "\"");
@@ -222,20 +230,96 @@ namespace OverwolfPatcher.Testing
                 return key?.GetValue("InstallFolder") as string ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Overwolf");
         }
 
-        static void RequireStopped()
+        static void RequireStopped(bool closeOverwolf, bool forceCloseOverwolf)
         {
-            var own = Process.GetCurrentProcess().Id;
-            foreach (var process in Process.GetProcesses())
-                using (process)
-                    if (process.Id != own && process.ProcessName.StartsWith("Overwolf", StringComparison.OrdinalIgnoreCase))
-                        throw new InvalidOperationException("Close Overwolf and its apps before applying/restoring. Running: " + process.ProcessName);
+            var running = OverwolfProcesses();
+            if (running.Count == 0) return;
+            var names = Describe(running);
+            if (!closeOverwolf)
+            {
+                foreach (var process in running) process.Dispose();
+                throw new InvalidOperationException("Close Overwolf and its apps before applying/restoring. Running: " + names);
+            }
+
+            // Ask politely first: anything with a window gets WM_CLOSE so the
+            // launcher and games can shut down on their own terms.
+            Console.WriteLine("Closing running Overwolf processes first: " + names);
+            foreach (var process in running)
+            {
+                try
+                {
+                    if (process.MainWindowHandle == IntPtr.Zero || !process.CloseMainWindow()) process.Kill();
+                }
+                catch { /* Helpers and already-exited processes are handled by the waits below. */ }
+            }
+            WaitForExit(running, 10000);
+
+            var survivors = running.Where(process => !HasExited(process)).ToList();
+            if (survivors.Count > 0 && forceCloseOverwolf)
+            {
+                Console.WriteLine("Forcing " + survivors.Count + " Overwolf process(es) closed: " + Describe(survivors));
+                foreach (var process in survivors)
+                {
+                    try { process.Kill(); }
+                    catch { } // Elevated processes we cannot touch surface as survivors below.
+                }
+                WaitForExit(survivors, 10000);
+                survivors = survivors.Where(process => !HasExited(process)).ToList();
+            }
+            var leftover = Describe(survivors);
+            foreach (var process in running) process.Dispose();
+            if (survivors.Count > 0)
+                throw new InvalidOperationException("Overwolf is still running and could not be closed: " + leftover +
+                    ". Close it manually (or run as administrator) and retry.");
         }
 
-        static int Instrument(string install, string version, string target, Dictionary<string, string> options)
+        static List<Process> OverwolfProcesses()
+        {
+            var own = Process.GetCurrentProcess().Id;
+            var found = new List<Process>();
+            foreach (var process in Process.GetProcesses())
+            {
+                var keep = false;
+                try { keep = process.Id != own && process.ProcessName.StartsWith("Overwolf", StringComparison.OrdinalIgnoreCase); }
+                catch { keep = false; } // Exited between enumeration and inspection.
+                if (keep) found.Add(process);
+                else process.Dispose();
+            }
+            return found;
+        }
+
+        static string Describe(IEnumerable<Process> processes)
+        {
+            return string.Join(", ", processes.Select(p =>
+            {
+                try { return p.ProcessName + "(" + p.Id + ")"; }
+                catch { return "unknown"; }
+            }).Distinct().OrderBy(value => value).ToArray());
+        }
+
+        static bool HasExited(Process process)
+        {
+            try { return process.HasExited; }
+            catch { return true; }
+        }
+
+        static void WaitForExit(IEnumerable<Process> processes, int milliseconds)
+        {
+            var pending = processes.ToList();
+            var deadline = DateTime.UtcNow.AddMilliseconds(milliseconds);
+            while (DateTime.UtcNow < deadline)
+            {
+                pending.RemoveAll(HasExited);
+                if (pending.Count == 0) return;
+                Thread.Sleep(100);
+            }
+        }
+
+        static int Instrument(string install, string version, string target, Dictionary<string, string> options, bool closeOverwolf, bool forceCloseOverwolf)
         {
             var profile = ProfileByVersion(version)
                 ?? throw new NotSupportedException("The startup profiler is pinned to known reviewed versions; refusing " + version + ".");
-            RequireStopped();
+            RequireStopped(closeOverwolf, forceCloseOverwolf);
             if (!File.Exists(target) || !string.Equals(Hash(target), profile.Hash, StringComparison.OrdinalIgnoreCase))
                 throw new IOException("The installed Core hash does not match the reviewed clean baseline for " + version + "; refusing to profile it.");
 
@@ -319,9 +403,9 @@ namespace OverwolfPatcher.Testing
             return 0;
         }
 
-        static int Baseline(string install, string version, Dictionary<string, string> options)
+        static int Baseline(string install, string version, Dictionary<string, string> options, bool closeOverwolf, bool forceCloseOverwolf)
         {
-            RequireStopped();
+            RequireStopped(closeOverwolf, forceCloseOverwolf);
             var managedExecutable = Path.Combine(install, "Overwolf.exe");
             var nativeLauncher = Path.Combine(install, "OverwolfLauncher.exe");
             if (!File.Exists(nativeLauncher)) nativeLauncher = Path.Combine(install, version, "OverwolfLauncher.exe");

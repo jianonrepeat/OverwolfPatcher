@@ -35,7 +35,12 @@ namespace
     const GUID kMvid310 =
         { 0x2343b6a9, 0x348b, 0x4862, { 0x85, 0x74, 0x2c, 0xb7, 0x28, 0x9f, 0x94, 0xca } };
 
+    const GUID kMvid311 =
+        { 0xdb25d012, 0x14ed, 0x485f, { 0x91, 0xc3, 0x2c, 0x96, 0x14, 0xc6, 0x86, 0x21 } };
+
     const AdapterProfile kKnownProfiles[] = {
+        { L"2C809D434B23E2F7753E79B1B3EEED3BA2DE5CA7D4D8D425D83CB641255ACE8E",
+          &kMvid311, false },
         { L"CCE1BFBE33A0DAA6189475583C6680CFC0043F015B1691A23AE8CF23CB45DE2D",
           &kMvid310, true },
     };
